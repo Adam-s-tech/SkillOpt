@@ -1473,6 +1473,65 @@ class TestFullCycleAndAdopt(unittest.TestCase):
                 os.path.realpath(memory_path),
             )
 
+    def test_cycle_stages_only_documents_that_changed(self):
+        from skillopt_sleep.consolidate import ConsolidationResult
+
+        with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
+            target = os.path.join(proj, ".agents", "skills", "taste", "SKILL.md")
+            memory_path = os.path.join(proj, "CLAUDE.md")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            skill = "# managed baseline\nrule\n"
+            memory = "# memory baseline\npreference\n"
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(skill)
+            with open(memory_path, "w", encoding="utf-8") as handle:
+                handle.write(memory)
+            cfg = load_config(
+                invoked_project=proj,
+                projects="invoked",
+                backend="mock",
+                claude_home=os.path.join(home, ".claude"),
+                target_skill_path=target,
+                auto_adopt=False,
+            )
+            result = ConsolidationResult(
+                accepted=True,
+                gate_action="accept_new_best",
+                baseline_score=0.1,
+                candidate_score=0.2,
+                new_skill=skill,
+                new_memory=memory + "learned preference\n",
+                applied_edits=[
+                    EditRecord("memory", "add", "learned preference")
+                ],
+                rejected_edits=[],
+                holdout_baseline=0.1,
+                holdout_candidate=0.2,
+            )
+            tasks = assign_splits(
+                researcher_persona(), holdout_fraction=0.34, seed=42
+            )
+
+            with mock.patch(
+                "skillopt_sleep.cycle.dream_consolidate",
+                return_value=result,
+            ):
+                outcome = run_sleep_cycle(cfg, seed_tasks=tasks)
+
+            with open(
+                os.path.join(outcome.staging_dir, "manifest.json"),
+                encoding="utf-8",
+            ) as handle:
+                manifest = json.load(handle)
+            self.assertFalse(manifest["has_managed_skill"])
+            self.assertTrue(manifest["has_managed_memory"])
+            self.assertFalse(
+                os.path.exists(os.path.join(outcome.staging_dir, "proposed_SKILL.md"))
+            )
+            self.assertTrue(
+                os.path.exists(os.path.join(outcome.staging_dir, "proposed_CLAUDE.md"))
+            )
+
     def test_managed_skill_change_during_consolidation_refuses_the_night(self):
         from skillopt_sleep.consolidate import ConsolidationResult
         from skillopt_sleep.staging import StagingError, latest_staging
