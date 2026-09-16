@@ -1473,15 +1473,17 @@ class TestFullCycleAndAdopt(unittest.TestCase):
                 os.path.realpath(memory_path),
             )
 
-    def test_cycle_stages_only_documents_that_changed(self):
+    def _assert_only_changed_documents_are_staged(
+        self, new_skill, new_memory, expect_skill, expect_memory
+    ):
         from skillopt_sleep.consolidate import ConsolidationResult
 
+        skill = "# managed baseline\nrule\n"
+        memory = "# memory baseline\npreference\n"
         with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
             target = os.path.join(proj, ".agents", "skills", "taste", "SKILL.md")
             memory_path = os.path.join(proj, "CLAUDE.md")
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            skill = "# managed baseline\nrule\n"
-            memory = "# memory baseline\npreference\n"
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(skill)
             with open(memory_path, "w", encoding="utf-8") as handle:
@@ -1494,16 +1496,19 @@ class TestFullCycleAndAdopt(unittest.TestCase):
                 target_skill_path=target,
                 auto_adopt=False,
             )
+            applied = []
+            if new_skill != skill:
+                applied.append(EditRecord("skill", "add", "sharpened rule"))
+            if new_memory != memory:
+                applied.append(EditRecord("memory", "add", "learned preference"))
             result = ConsolidationResult(
                 accepted=True,
                 gate_action="accept_new_best",
                 baseline_score=0.1,
                 candidate_score=0.2,
-                new_skill=skill,
-                new_memory=memory + "learned preference\n",
-                applied_edits=[
-                    EditRecord("memory", "add", "learned preference")
-                ],
+                new_skill=new_skill,
+                new_memory=new_memory,
+                applied_edits=applied,
                 rejected_edits=[],
                 holdout_baseline=0.1,
                 holdout_candidate=0.2,
@@ -1518,19 +1523,63 @@ class TestFullCycleAndAdopt(unittest.TestCase):
             ):
                 outcome = run_sleep_cycle(cfg, seed_tasks=tasks)
 
+            # Staging never edits the live documents; adoption stays explicit.
+            with open(target, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), skill)
+            with open(memory_path, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), memory)
+
             with open(
                 os.path.join(outcome.staging_dir, "manifest.json"),
                 encoding="utf-8",
             ) as handle:
                 manifest = json.load(handle)
-            self.assertFalse(manifest["has_managed_skill"])
-            self.assertTrue(manifest["has_managed_memory"])
-            self.assertFalse(
-                os.path.exists(os.path.join(outcome.staging_dir, "proposed_SKILL.md"))
+            # Manifest flags and artifact presence have to agree; a flag without
+            # its file (or a file without its flag) would break adoption.
+            self.assertEqual(manifest["has_managed_skill"], expect_skill)
+            self.assertEqual(manifest["has_managed_memory"], expect_memory)
+            self.assertEqual(
+                os.path.exists(
+                    os.path.join(outcome.staging_dir, "proposed_SKILL.md")
+                ),
+                expect_skill,
             )
-            self.assertTrue(
-                os.path.exists(os.path.join(outcome.staging_dir, "proposed_CLAUDE.md"))
+            self.assertEqual(
+                os.path.exists(
+                    os.path.join(outcome.staging_dir, "proposed_CLAUDE.md")
+                ),
+                expect_memory,
             )
+
+    def test_cycle_stages_only_documents_that_changed(self):
+        # The staging contract is byte/text equality, not semantic or whitespace
+        # normalized comparison: an accepted cycle proposes a document only when it
+        # actually rewrote it. Covered for every shape an accepted result can take,
+        # so a symmetric regression on the skill side cannot hide behind the
+        # memory-only case.
+        skill = "# managed baseline\nrule\n"
+        memory = "# memory baseline\npreference\n"
+        new_skill = skill + "prefer the shortest reproduction\n"
+        new_memory = memory + "learned preference\n"
+        cases = (
+            ("neither_changed", skill, memory, False, False),
+            ("skill_only", new_skill, memory, True, False),
+            ("memory_only", skill, new_memory, False, True),
+            ("both_changed", new_skill, new_memory, True, True),
+            # Whitespace-only is a real change under a byte-equality contract, so it
+            # is a positive case. If this ever fails, the comparison has started
+            # normalizing and the documented contract has silently moved.
+            ("whitespace_only_skill", skill + "\n", memory, True, False),
+            ("whitespace_only_memory", skill, memory + "  \n", False, True),
+        )
+        for name, candidate_skill, candidate_memory, expect_skill, expect_memory in cases:
+            with self.subTest(case=name):
+                self._assert_only_changed_documents_are_staged(
+                    candidate_skill,
+                    candidate_memory,
+                    expect_skill,
+                    expect_memory,
+                )
 
     def test_managed_skill_change_during_consolidation_refuses_the_night(self):
         from skillopt_sleep.consolidate import ConsolidationResult
