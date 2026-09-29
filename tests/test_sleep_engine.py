@@ -82,6 +82,97 @@ class TestHarvest(unittest.TestCase):
         self.assertTrue(_is_meta_prompt("<system-reminder>x</system-reminder>"))
         self.assertFalse(_is_meta_prompt("please refactor the auth module"))
 
+    def _claude_session_with_injected_messages(self, tmp, follow_up):
+        """A Claude Code session as written to disk when a skill is loaded.
+
+        Claude Code records the loaded skill's SKILL.md body, and messages it
+        relays from other sessions, as ``role: user`` records marked
+        ``isMeta: true``. The user typed neither. The skill body here uses
+        words the feedback heuristic treats as a complaint ("wrong",
+        "revert", "did not"), as real skill documents do.
+        """
+        def record(role, content, **extra):
+            return {
+                "type": role,
+                "timestamp": "2026-09-29T03:56:20Z",
+                "cwd": "/repo/example",
+                "message": {"role": role, "content": content},
+                **extra,
+            }
+
+        path = os.path.join(tmp, "session.jsonl")
+        records = [
+            record("user", "update the release notes for 1.4"),
+            record("assistant", [
+                {"type": "tool_use", "name": "Skill", "input": {"skill": "docs:release-notes"}},
+            ]),
+            record("user", [{"type": "text", "text": (
+                "Base directory for this skill: /home/u/.claude/plugins/cache/m/docs/1.0.0/"
+                "skills/release-notes\n\n# Release notes\n\nIf an entry is wrong, revert it."
+                " A note that did not name the version is broken."
+            )}], isMeta=True),
+            record("user", "Another Claude session sent a message:\n<cross-session-message>"
+                           "status: still failing</cross-session-message>", isMeta=True),
+            record("assistant", [{"type": "text", "text": "Release notes updated."}]),
+        ]
+        if follow_up:
+            records.append(record("user", follow_up))
+        self._write_jsonl(path, records)
+        return path
+
+    def test_digest_skips_claude_injected_meta_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            digest = digest_transcript(self._claude_session_with_injected_messages(tmp, ""))
+
+        self.assertEqual(digest.user_prompts, ["update the release notes for 1.4"])
+        self.assertEqual(digest.n_user_turns, 1)
+        self.assertEqual(digest.feedback_signals, [])
+        # The skill is still attributed from the assistant's Skill tool call.
+        self.assertEqual(digest.skills_used, ["docs:release-notes"])
+
+    def test_injected_skill_body_does_not_decide_the_mined_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            digest = digest_transcript(
+                self._claude_session_with_injected_messages(tmp, "perfect, thanks")
+            )
+
+        [task] = heuristic_mine([digest])
+        self.assertEqual(task.intent, "update the release notes for 1.4")
+        self.assertEqual(task.outcome, "success")
+        self.assertNotIn("Base directory for this skill", task.context_excerpt)
+
+    def test_injected_agent_marker_body_still_drops_the_session(self):
+        # The plugin's own /skillopt-sleep body arrives the same way as a
+        # skill body. It must still mark the session as machine-driven.
+        from skillopt_sleep.harvest import harvest
+
+        def record(content, **extra):
+            return {
+                "type": "user",
+                "timestamp": "2026-09-29T03:56:20Z",
+                "cwd": "/repo/example",
+                "message": {"role": "user", "content": content},
+                **extra,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = os.path.join(tmp, "-repo-example")
+            os.makedirs(project_dir)
+            self._write_jsonl(os.path.join(project_dir, "session.jsonl"), [
+                record("<command-message>skillopt-sleep</command-message>\n"
+                       "<command-name>/skillopt-sleep</command-name>"),
+                record([{"type": "text", "text": (
+                    "Base directory for this skill: /plugins/claude-code\n\n"
+                    "You are driving **SkillOpt-Sleep**: a tool that ..."
+                )}], isMeta=True),
+                {"type": "assistant", "timestamp": "2026-09-29T03:56:30Z",
+                 "message": {"role": "assistant",
+                             "content": [{"type": "text", "text": "Status: idle."}]}},
+                dict(record("ok, run it tonight please"), timestamp="2026-09-29T04:10:00Z"),
+            ])
+
+            self.assertEqual(harvest(tmp, scope="all"), [])
+
     def test_digest_real_transcript_if_present(self):
         # uses the live machine's transcripts when available; skips otherwise
         base = os.path.expanduser("~/.claude/projects")

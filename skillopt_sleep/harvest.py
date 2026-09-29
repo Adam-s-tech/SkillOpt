@@ -265,7 +265,16 @@ def digest_transcript(path: str) -> Optional[SessionDigest]:
         role = msg.get("role")
         content = msg.get("content")
         if role == "user":
+            # Claude Code marks text it injects on the user's behalf with
+            # isMeta: a loaded skill's SKILL.md body, messages relayed from
+            # other sessions, usage-limit notices. The user typed none of it.
+            # A body that names a known agent session is still kept, so
+            # _is_agent_session can drop the whole session as before.
             text = _text_from_content(content)
+            if rec.get("isMeta") is True and not any(
+                marker in text for marker in _AGENT_SESSION_MARKERS
+            ):
+                continue
             if text and not _is_meta_prompt(text):
                 n_user += 1
                 user_prompts.append(text.strip())
