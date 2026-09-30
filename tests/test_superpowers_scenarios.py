@@ -362,7 +362,10 @@ class TestHarnessEvidence:
             ws = Path(tmpdir)
             log = ws / "pytest.log"
             log.write_text("run\n")
-            (ws / "broken.py").symlink_to(ws / "missing.py")
+            try:
+                (ws / "broken.py").symlink_to(ws / "missing.py")
+            except OSError:
+                pytest.skip("symlinks unavailable")
             assert _pytest_after_edit(log, ws) is False
 
     @pytest.mark.skipif(os.name != "posix", reason="test executes POSIX pytest shims")
@@ -869,7 +872,10 @@ class TestCLIFailClosed:
             real = Path(tmpdir) / "real.md"
             real.write_text("# x")
             link = Path(tmpdir) / "link.md"
-            link.symlink_to(real)
+            try:
+                link.symlink_to(real)
+            except OSError:
+                pytest.skip("symlinks unavailable")
             with pytest.raises(ValueError, match="must not be a symlink"):
                 SuperpowersEvaluator().evaluate(candidate_skill_path=str(link))
 
