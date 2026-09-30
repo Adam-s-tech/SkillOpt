@@ -63,6 +63,14 @@ def _iter_jsonl(path: str) -> Iterable[Dict[str, Any]]:
         return
 
 
+def _safe_mtime(path: str) -> float:
+    """Return a sortable mtime without failing on a concurrently removed file."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def _text_from_content(content: Any) -> str:
     """Flatten a message.content (str or list of blocks) into text."""
     if isinstance(content, str):
@@ -354,7 +362,7 @@ def harvest(
             if fn.endswith(".jsonl") and not fn.startswith("agent-"):
                 paths.append(os.path.join(root, fn))
     # newest first by mtime
-    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    paths.sort(key=_safe_mtime, reverse=True)
 
     for p in paths:
         d = digest_transcript(p)
